@@ -1,0 +1,211 @@
+
+%web_drop_table(death_counts_v3);
+
+
+FILENAME REFFILE '/home/u62990512/sasuser.v94/Provisional_Death_Counts_for_Influenza__Pneumonia__and_COVID-19_v2.csv';
+
+PROC IMPORT DATAFILE=REFFILE
+	DBMS=CSV
+	OUT=death_counts_v3;
+	GETNAMES=YES;
+RUN;
+
+PROC CONTENTS DATA=death_counts_v3; RUN;
+
+
+%web_open_table(death_counts_v3);
+
+%web_drop_table(covid_cases_v2);
+
+FILENAME REFFILE '/home/u62990512/sasuser.v94/United_States_COVID-19_Cases_and_Deaths_by_State_over_Time_ARCHIVED_v3.csv';
+
+PROC IMPORT DATAFILE=REFFILE
+	DBMS=CSV
+	OUT=covid_cases_v2;
+	GETNAMES=YES;
+RUN;
+
+PROC CONTENTS DATA=covid_cases_v2; RUN;
+
+
+proc format;
+    value $statefmt
+        "Alabama" = "AL"
+        "Alaska" = "AK"
+        "Arizona" = "AZ"
+        "Arkansas" = "AR"
+        "California" = "CA"
+        "Colorado" = "CO"
+        "Connecticut" = "CT"
+        "District of Columbia" = "DC"
+        "Delaware" = "DE"
+        "Florida" = "FL"
+        "Georgia" = "GA"
+        "Hawaii" = "HI"
+        "Iowa" = "IA"
+        "Idaho" = "ID"
+        "Illinois" = "IL"
+        "Indiana" = "IN"
+        "Kansas" = "KS"
+        "Kentucky" = "KY"
+        "Louisiana" = "LA"
+        "Massachusetts" = "MA"
+        "Maryland" = "MD"
+        "Maine" = "ME"
+        "Michigan" = "MI"
+        "Minnesota" = "MN"
+        "Missouri" = "MO"
+        "Mississippi" = "MS"
+        "Montana" = "MT"
+        "North Carolina" = "NC"
+        "North Dakota" = "ND"
+        "Nebraska" = "NE"
+        "New Hampshire" = "NH"
+        "New Jersey" = "NJ"
+        "New Mexico" = "NM"
+        "Nevada" = "NV"
+        "New York" = "NY"
+        "Ohio" = "OH"
+        "Oklahoma" = "OK"
+        "Oregon" = "OR"
+        "Pennsylvania" = "PA"
+        "Puerto Rico" = "PR"
+        "Rhode Island" = "RI"
+        "South Carolina" = "SC"
+        "South Dakota" = "SD"
+        "Tennessee" = "TN"
+        "Texas" = "TX"
+        "Utah" = "UT"
+        "Virginia" = "VA"
+        "Virgin Islands" = "VI"
+        "Vermont" = "VT"
+        "Washington" = "WA"
+        "Wisconsin" = "WI"
+        "West Virginia" = "WV"
+        "Wyoming" = "WY";
+run;
+
+/* Apply the format to the dataset */
+data death_counts_v3;
+    set death_counts_v3;
+    state_abbr = put(Jurisdiction, $statefmt.);
+run;
+
+
+proc print data=covid_cases_v2 (obs = 100) ;
+run;
+
+proc print data=death_counts_v3 (obs = 100) ;
+run;
+
+/* aggregate covid cases by end of week */
+data covid_cases_v2;
+   set covid_cases_v2;
+   new_case_Num = input(new_case, best12.);
+   drop new_cases;
+   rename new_case_Num = new_cases;
+run;
+
+proc sql;
+   create table covid_cases_agg as
+   select week_end, state, sum(new_case) as total_new_cases
+   from covid_cases_v2
+   group by week_end, state;
+quit;
+
+proc contents data=death_counts_v3;
+run;
+
+proc contents data=covid_cases_agg;
+run;
+
+data death_counts_v3;
+	set death_counts_v3(rename=('End Week'n=week_end));
+run;
+/* join aggregated covid cases to death counts */
+proc sql;
+    create table joined_cases_and_deaths_table as
+    select a.*, b.*
+    from death_counts_v3 as a
+    inner join covid_cases_agg as b
+    on a.state_abbr = b.state and a.week_end = b.week_end;
+quit;
+
+proc varmax data=joined_cases_and_deaths_table(where=(Jurisdiction='Alabama' and Age_Group='All Ages'));
+   id week_end interval=week;
+   model total_new_cases Pneumonia_or_Influenza / p=1;
+   output out=ts_output lead=1;
+run;
+
+proc varmax data=joined_cases_and_deaths_table(where=(Jurisdiction='Alabama' and Age_Group='All Ages'));
+   id week_end interval=week;
+   model total_new_cases Pneumonia_or_Influenza / p=1;
+   causal group1=(total_new_cases) group2=(Pneumonia_or_Influenza);
+   causal group1=(Pneumonia_or_Influenza) group2=(total_new_cases);
+   output out=ts_output lead=1;
+run;
+
+proc arima data=joined_cases_and_deaths_table;
+   identify var=total_new_cases crosscorr=(Pneumonia_or_Influenza);
+   identify var=Pneumonia_or_Influenza crosscorr=(total_new_cases);
+run;
+
+proc varmax data=joined_cases_and_deaths_table(where=(Jurisdiction='Alabama' and Age_Group='All Ages'));
+   id week_end interval=week;
+   model total_new_cases Pneumonia_or_Influenza / p=3;
+   causal group1=(total_new_cases) group2=(Pneumonia_or_Influenza);
+   causal group1=(Pneumonia_or_Influenza) group2=(total_new_cases);
+   output out=ts_output lead=1;
+run;
+
+proc arima data=joined_cases_and_deaths_table;
+   identify var=total_new_cases crosscorr=(Pneumonia_or_Influenza);
+   identify var=Pneumonia_or_Influenza crosscorr=(total_new_cases);
+run;
+
+data cleaned_data;
+   set joined_cases_and_deaths_table;
+   if not missing(total_new_cases) and not missing(Pneumonia_or_Influenza);
+run;
+
+proc arima data=cleaned_data(where=(Jurisdiction='Alabama' and Age_Group='All Ages'));
+   identify var=total_new_cases crosscorr=(Pneumonia_or_Influenza);
+   identify var=Pneumonia_or_Influenza crosscorr=(total_new_cases);
+run;
+
+proc means data=cleaned_data(where=(Age_Group='All Ages')) n min max;
+   class Jurisdiction;
+   var total_new_cases Pneumonia_or_Influenza;
+run;
+
+
+
+proc varmax data=cleaned_data(where=(Jurisdiction='Alabama' and Age_Group='All Ages'));
+   id week_end interval=week;
+   model total_new_cases Pneumonia_or_Influenza / p=3;
+   causal group1=(total_new_cases) group2=(Pneumonia_or_Influenza);
+   causal group1=(Pneumonia_or_Influenza) group2=(total_new_cases);
+   output out=ts_output lead=2;
+run;
+
+proc sort data=cleaned_data;
+   by Jurisdiction;
+run;
+
+
+
+proc varmax data=cleaned_data(where=(Age_Group='All Ages'));
+   by Jurisdiction;
+   id week_end interval=week;
+   model total_new_cases Pneumonia_or_Influenza / p=3;
+   causal group1=(total_new_cases) group2=(Pneumonia_or_Influenza);
+   causal group1=(Pneumonia_or_Influenza) group2=(total_new_cases);
+   output out=ts_output lead=2;
+run;
+
+proc sql;
+   create table ts_output_limited as
+   select *
+   from ts_output
+   where week_end in ('22OCT2022'd, '23OCT2022'd, '30OCT2022'd);
+quit;
